@@ -15,10 +15,13 @@ static uint32_t colors[8] = {
 };
 
 void draw(uint32_t color) {
-  // change the code below
   int w = io_read(AM_GPU_CONFIG).width;
   int h = io_read(AM_GPU_CONFIG).height;
-  for(int i = 0; i < w * h; i++){
+  
+  if (w > MAX_W) w = MAX_W;			//这里强制改变如果超出设为最大值
+  if (h > MAX_H) h = MAX_H;
+  int n = w * h;
+  for (int i = 0; i < n; i++) {
     img_buffer[i] = color;
   }
   io_write(AM_GPU_FBDRAW, 0, 0, img_buffer, w, h, true);
@@ -37,27 +40,50 @@ static uint32_t cal_color_code(uint32_t c_pri, uint32_t c_next, int i, int k){
   return (r << 16) | (g << 8) | b;//返回的是第i步的色号
 }
 
+#define STEPS          30      // 一次颜色过渡的总步数
+#define FRAME_US       16667   // 正常帧间隔(微秒)，约 60 FPS
+#define FRAME_FAST_US  8000    // 加速时的帧间隔，约 125 FPS
+#define STEPS_PER_FRAME_FAST 2 // 加速时每帧多走几步
+
 //改一下循环逻辑
 int main() {
 	ioe_init(); // initialization for GUI
-	srand(io_read(AM_TIMER_UPTIME).us);
+	srand((unsigned)io_read(AM_TIMER_UPTIME).us);
 
 	uint32_t cur = colors[0];
 	uint32_t dst = colors[rand() % 8];
-	int steps = 60;
+	while (dst == cur) dst = colors[rand() % 8];	// 避免起手颜色相同
 	int i = 0;
-	long last = 0;
-	while (1) {
-		unsigned long now = io_read(AM_TIMER_UPTIME).us / 1000;	//now以毫秒为单位进行更新，每次循环都比上一次大一毫秒
-		if (now - last < 1000/60) continue;//此处理解成双锚点，两锚点若相差还不足1000/60 毫秒，即1/60秒，则last暂时不跟进至now
-		last = now;		//这两个数只是控制while循环的频率，不进入函数
+	uint64_t last = io_read(AM_TIMER_UPTIME).us;		//它在循环外，初始化完就等着76行来拉它了
+	bool fast = false;	// 按住任意非 ESC 键时为 true
 
-		draw(cal_color_code(cur, dst, i, steps));
-		i++;
-		if(i > steps){
-			cur = dst;
-			dst = colors[rand() % 8];
-			i = 0;
+	while (1) {
+		// 一次读取键盘事件，避免 keydown 和 keycode 来自两次不同的采样
+		AM_INPUT_KEYBRD_T kbd = io_read(AM_INPUT_KEYBRD);
+		if (kbd.keycode != AM_KEY_NONE) {
+			if (kbd.keydown) {
+				if (kbd.keycode == AM_KEY_ESCAPE) break;
+				fast = true;	// 按下任意其他键加速
+			} else {
+				fast = false;	// 松开按键恢复正常速度
+			}
+		}
+
+		// now/last 都是微秒，单位一致
+		uint64_t now = io_read(AM_TIMER_UPTIME).us;
+		uint64_t interval = fast ? FRAME_FAST_US : FRAME_US;	//选择帧间隔
+		if (now - last < interval) continue;	// 还没到下一帧，先不更新画面
+		last = now;
+
+		int advance = fast ? STEPS_PER_FRAME_FAST : 1;//选择帧输出次数
+		for (int n = 0; n < advance; n++) {
+			draw(cal_color_code(cur, dst, i, STEPS));
+			i++;
+			if (i >= STEPS) {
+				cur = dst;
+				dst = colors[rand() % 8];
+				i = 0;
+			}
 		}
 	}
 	return 0;
